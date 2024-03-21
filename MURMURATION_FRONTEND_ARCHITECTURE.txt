@@ -1,0 +1,192 @@
+# Introduction
+
+The task as I understand it, is to deploy the contents from the website folder to my own infrastructure. The website is statically generated, meaning, we have to run some tasks to generate the content, but once generated it is static pages. Just plain HTML, CSS, and Javascript.
+
+# Initial Thoughts
+
+Once I saw what I was dealing with, there were 2 deployment methods that came to mind. The first one was AWS S3. Since S3 can serve static sites pretty easily, this would be a good use case for it. It's simple, it's highly available, and it would be easy to deploy. My second thought was to deploy to cloudflare pages since I use cloudflare myself and it would be easy to get going without maintaining any infrastructure. Just boot strap it and deploy.
+
+With that said, there are many other ways to deploy this application. For that reason, I am going to go over a few architectures and solutions just because that is what Murmuration has at their disposible.
+
+The possible ways that this application could be deployed:
+
+    - AWS S3
+    - Managed Serverless solution (Cloudflare, Vercel, Netlify, etc..)
+    - AWS ECS (Some managed container solution)
+    - AWS Lambda (Serverless, but more fine-grained control)
+    - Kubernetes
+
+I will be discussing solutions for AWS S3, Cloudflare, and AWS ECS. I will briefly touch on Lambda and K8s. I will not be defining a solution for that since I believe in you should use the tools that are already at your disposable instead of coming up with new solutions. So, if you had a k8s cluster setup, then I would design something around that and it would be somewhat different than all these other solutions.
+
+# Getting Started
+
+I need to familarize myself with the build process. I spent a few minutes looking that over to see what what was needed. These were the steps I found in the pipeline:
+
+```
+- checkout
+- fixgit
+- restore_cache:
+    key: deps-20230606-bw-{{ checksum "requirements.txt" }}
+- setup
+- installdeps
+- installtorchcpu
+- save_cache:
+    key: deps-20230606-bw-{{ checksum "requirements.txt" }}
+    paths:
+    - "~/venv/bin"
+    - "~/venv/lib"
+- run:
+    working_directory: ~/ParlAI/website
+    name: build the website
+    command: make
+```
+
+There are few steps we don't need after further exploring. The main steps are:
+
+```
+- setup
+- installdeps
+- installtorchcpu
+- (make)
+```
+
+The first step I wanted to take was to make sure that everything built properly locally. My workflow usually consists of downloading a docker image and working from a clean environment. I normally work on a windows machine as my personal device, so having a linux envinronment to work from is ideal. So, that is what I did.
+
+`docker run -it --rm -v $(pwd):/app python:3.9 /bin/bash`
+
+Where the current working directory was the Parlai repo directory. Now that I have a python 3.9 environment running, I can test the build steps. 
+
+I created a new environment:
+
+```
+cd /app
+python -m venv ./venv
+. ./venv/bin/activate
+```
+
+You do not really need to do this, but it's helpful so I can just stay in the container if I need to rebuild something. Otherwise, exiting out and creating a new one would work as well. I also wanted to follow as close to the original pipeline as possible.
+
+Next, I ran the commands for `installdeps`, `installtorchcpu`, and then cd into website and ran `make`.
+
+I was able to get the build output and all the files were there.
+
+Once i verified that this worked, I was ready to deploy it myself.
+
+
+
+
+# Cloudflare Deployment
+
+Since I already have a cloudflare account with some websites already deployed. I wanted to deploy the site to there and test it out before proceeding.
+
+## Architecture
+
+The architecture is simple for us as cloudflare takes care of everything else. We only need to bootstrap the repo and tell it what to run. This required a script to build the files though and then to deploy those files out. Cloudflare uses cloudflare workers for these deployments, which are just serverless containers. So, when someone visits the site, it will spin up a serverless function to give that data to the user. Cloudflare is one of the fastest providers of serverless architectures on average. Pages provides a highly available way to serve your content at different regions. With this in mind, your site is going to be pretty reliable and should almost never go down.
+
+## Deplyoment Config
+
+We need to have a script to generate the files. Since there was already a make file, I decided to just add a few steps in there for cloudflare to build it.
+
+If you look at the new [Makefile](./website/Makefile), you will notice a few extra steps. I took the same steps as before and slightly modified them and created a cloudflare step so that it was easy to specify the build steps within cloudflare.
+
+The project settings now look like:
+
+```
+Build command: make cloudflare
+Build output directory: /build
+Root directory: /website
+Environment variables:
+    PYTHON_VERSION 3.9
+```
+
+From here, all we need to do is check in code and cloudflare will automatically start to build and deploy. And you can see the site deployed to https://main.parlai.pages.dev
+
+That worked and I can now see a new site running. Fast and easy.
+
+## Issues I Ran Into
+
+I did run into a few issues with my initial makefile and the build failed. It was because my root directory was in the website folder and so I had to make some slight modifications to cd up a directory and run certain commands from there.
+
+I also turned on caching for builds as installing the dependencies take forever. This then reduced any iterations of builds after that, so I wasn't waiting around forever to install dependencies.
+
+
+
+
+# AWS S3
+
+My initial thought was to go this direction. After looking the CI pipeline that is already defined, I can see they are already doing this. This would make it easy to modify slightly and to deploy
+
+
+
+
+
+# AWS ECS Fargate Deployment
+
+As you saw before, I like to work in containers to test and experiment at times. With this in mind, I could do mostly the same thing and just create a Dockerfile to create a new docker image. This is handy as we now have a way to run this locally and we can deploy this in ECS if we wanted to.
+
+The underlying architecture is a little more involved
+
+## Architecture
+
+You would need a private and public subnet. The public subnet is where you would place your load balancer to point to the fargate cluster. You also want to secure communications by using HTTPS, so you can use AWS cert manager and route53 to create a TLS connection. The DNS would resolve the ALB and then the ALB would forward the traffic to the fargate cluster. You could also add a cloudfront distribution if you wanted to cache files as well.
+
+From there, you need specify a fargate cluster which is comprised up of a Service which gives a task definition (cpu, memory, image to use), which VPC and subnets to run the cluster in, and a registry to push and pull your images from.
+
+You would also need to setup security groups so the ALB can communicate to the fargate cluster and you would need to setup IAM roles so that you can actually pull images from ECR.
+
+```
+|--------|    |--------------------|    |---------|    |---------------|    |-----------------|
+|  User  |--->|  AWS Cert Manager  |--->| Route53 |--->| Public Subnet |--->| Private Subnet  |
+|--------|    |--------------------|    |---------|    |     ALB       |    | Fargate Cluster |
+                                                       |---------------|    |-----------------|
+
+                     |-------|
+                     |  ECR  |
+                     |-------|
+                        ^
+|-- VPC ----------------|-------------|
+|                       |             |
+|   |------ AZ1 --------|---------|   |
+|   |  |---- Fargate  --|-------| |   |  |-------------|
+|   |  |   |------| |---|--|   <|-|---|--|   Service   |
+|   |  |   | Task | | Task |    | |   |  |-------------|
+|   |  |   |------| |------|    | |   |
+|   |  |------------------------| |   |
+|   |-----------------------------|   |
+|                                     |
+|   |------ AZ2 ------------------|   |
+|   |  |---- Fargate  ----------| |   |
+|   |  |   |------| |------|    | |   |
+|   |  |   | Task | | Task |    | |   |
+|   |  |   |------| |------|    | |   |
+|   |  |------------------------| |   |
+|   |-----------------------------|   |
+|-------------------------------------|
+
+```
+
+## Docker Image
+
+We will need a docker image to build and deploy. I have done that with [docs.Dockerfile](./.murmuration-ci/ecs-fargate/docs.Dockerfile). And it can be run:
+
+`docker build -f ./.murmuration-ci/ecs-fargate/docs.Dockerfile . -t parlai-docs`
+
+Since these generate static files, we can really use anything to serve the content. In this case, I chose a minimal busybox container, which makes the output to be around 65MB in size. This will be useful when trying to pull the image down and make it faster.
+
+Another consideration I took was breaking up the steps into different layers. This helps with caching and build time since we won't have to reinstall and compile a bunch of dependencies when making small changes.
+
+## ECS Task Definition
+
+We need to create a task definition for this. This can be found [task-definition.json](./.murmuration-ci/ecs-fargate/task-definition.json). 
+
+## Pipeline
+
+If you imagine we have an ECS cluster already setup, then we now have everything needed to deploy this app via a pipeline. I will be using Github actions to do this. This pipeline file can be found [github-actions-pipeline.yaml](./.murmuration-ci/ecs-fargate/github-actions-pipeline.yaml).
+
+The reason for recreating the pipeline is because we are now moving the build steps into the docker file instead of building it via the pipeline. This eliminates a lot of the steps needed and we are also deploying it differently from the original pipeline.
+
+Anytime something gets merged into the main branch, this pipeline would automatically get kicked off and deploy.
+
+## Thoughts
+
+If the infrastructure is already there, then this would be a good way to deploy your application. For a web application like this, it is probably overkill, but if you need additional features and a little more control, this would be a good way to do it. 
