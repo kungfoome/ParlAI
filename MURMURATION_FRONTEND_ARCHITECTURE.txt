@@ -232,3 +232,14 @@ If the infrastructure is already there, then this would be a good way to deploy 
 # Kubernetes Deployment
 
 If you already had a kubernetes cluster setup, this would also be a good way to deploy. Using something like ArgoCD is pretty simple and you would just need to make some slight modifications to the ECS Fargate pipeline and instead of deploying it to there, you would update the ArgoCD application to point to a new docker image. This would then take over and automatically deploy it. All previous steps to build and test would be the same.
+
+
+# Final Thoughts
+
+There are many ways to skin a cat and I would choose the tool that is most appropriate. Given the architecture at Murmuration, I would choose the S3 option first. This is simple and easy to manage. I would also update the CDK code to do the deployment instead of using s3cmd. I can then automatically reference the bucket without having a chicken and the egg problem. This also puts everything in code and there is not a lot of bootstrapping that you need to do.
+
+After that I would use something like Cloudflare pages if available. This is also a simple and highly scalable solution. You do need to bootstrap it, so there is a bit more manual effort when compared to the s3 solution.
+
+I would also spend some more time on trying to reduce the build times down and implementing some more caching. I am not clear if a lot of the dependencies are actually needed to build the docs.
+
+The overall initial pipelines and design are easy to read and it works as intended. I think the pipelines are great and I feel like they are completely implemented for building documentation.
